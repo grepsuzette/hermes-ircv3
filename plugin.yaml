@@ -1,0 +1,79 @@
+name: irc-platform
+label: IRC
+kind: platform
+version: 1.0.0
+description: >
+  IRC gateway adapter for Hermes Agent.
+  Connects to an IRC server and relays messages between IRC channels
+  (or DMs) and the Hermes agent.  No external dependencies — uses
+  Python's stdlib asyncio for the IRC protocol.
+  Supports IRCv3 draft/multiline, multi-channel, NickServ auth,
+  custom CA certs, and nick collision recovery.
+author: Team Alex
+license: GPL-3.0
+requires_env:
+  - name: IRC_SERVER
+    description: "IRC server hostname (e.g. irc.libera.chat)"
+    prompt: "IRC server"
+    password: false
+  - name: IRC_CHANNELS
+    description: "Comma-separated channels to join (e.g. #bots,#help)"
+    prompt: "IRC channels"
+    password: false
+  - name: IRC_NICK
+    description: "Bot nickname on IRC"
+    prompt: "Bot nickname"
+    password: false
+optional_env:
+  - name: IRC_PORT
+    description: "IRC server port (default: 6667, 6697 with TLS)"
+    prompt: "IRC port"
+    password: false
+  - name: IRC_USERNAME
+    description: "Username for USER command (default: IRC_NICK)"
+    prompt: "Username"
+    password: false
+  - name: IRC_REALNAME
+    description: "Realname for USER command (default: Hermes Agent)"
+    prompt: "Realname"
+    password: false
+  - name: IRC_PASSWORD
+    description: "Server password (optional)"
+    prompt: "Server password"
+    password: true
+  - name: IRC_USE_TLS
+    description: "Enable TLS (true/false, default: false)"
+    prompt: "Use TLS?"
+    password: false
+  - name: IRC_TLS_CA_CERT
+    description: "Path to custom CA certificate (PEM)"
+    prompt: "CA cert path"
+    password: false
+  - name: IRC_NICKSERV_PASSWORD
+    description: "NickServ password for IDENTIFY on connect"
+    prompt: "NickServ password"
+    password: true
+  - name: IRC_NICKSERV_SERVICE
+    description: "NickServ service name (default: NickServ)"
+    prompt: "NickServ service"
+    password: false
+  - name: IRC_MESSAGE_CHUNK_LIMIT
+    description: "Max chars per message when BATCH unavailable (default: 350)"
+    prompt: "Message chunk limit"
+    password: false
+  - name: IRC_REQUIRE_MULTILINE
+    description: "Fail if server lacks draft/multiline (default: false)"
+    prompt: "Require multiline?"
+    password: false
+  - name: IRC_ALLOWED_USERS
+    description: "Comma-separated allowed nicks"
+    prompt: "Allowed nicks"
+    password: false
+  - name: IRC_ALLOW_ALL_USERS
+    description: "Allow anyone to talk to the bot"
+    prompt: "Allow all users?"
+    password: false
+  - name: IRC_HOME_CHANNEL
+    description: "Default channel for cron delivery"
+    prompt: "Home channel"
+    password: false
