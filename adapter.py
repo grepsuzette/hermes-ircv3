@@ -456,6 +456,19 @@ class IRCAdapter(BasePlatformAdapter):
         """IRC has no typing indicator - no-op."""
         pass
 
+    async def edit_message(self, chat_id: str, message_id: str, content: str, **kwargs) -> None:
+        """IRC has no native edit — send only the new lines since last call."""
+        lines = content.split('\n')
+        sent_key = f"_progress_sent_{chat_id}"
+        already = getattr(self, sent_key, 0)
+        new_lines = lines[already:]
+        for line in new_lines:
+            if line.strip():
+                self._send_line(f"PRIVMSG {chat_id} :{line}")
+        setattr(self, sent_key, len(lines))
+        if self._writer:
+            await self._writer.drain()
+
     def format_message(self, content: str) -> str:
         """Return content unchanged."""
         return content
