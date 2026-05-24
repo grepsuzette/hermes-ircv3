@@ -20,6 +20,8 @@ Environment variables:
     IRC_NICKSERV_SERVICE NickServ service name (default: NickServ)
     IRC_ALLOWED_USERS    Comma-separated nicks/hosts allowed to command bot
     IRC_HOME_CHANNEL     Default channel for cron/notification delivery
+    IRC_AMBIENT_MEMORY   Observe unaddressed channel lines into Honcho (default: true)
+    IRC_AMBIENT_BUFFER   Max unaddressed lines buffered per channel (default: 20)
 
 Notes:
     - IRC is text-only; no media support (images, voice, documents)
@@ -51,6 +53,7 @@ from gateway.platforms.base import (
     SendResult,
     SessionSource,
 )
+from gateway.session import build_session_key
 
 logger = logging.getLogger(__name__)
 
@@ -195,6 +198,21 @@ class IRCAdapter(BasePlatformAdapter):
         self._actual_nick: str = self._nick
         self._nick_collision_attempted: bool = False
 
+        # Ambient memory: record unaddressed channel chatter into Honcho so the
+        # bot builds peer cards for people it observes but never replies to.
+        self._ambient_memory: bool = os.getenv("IRC_AMBIENT_MEMORY", "true").lower() in ("true", "1", "yes")
+        self._ambient_buffer_size: int = int(os.getenv("IRC_AMBIENT_BUFFER", "20"))
+        from collections import deque
+        # Per-channel rolling buffer of recent unaddressed lines (for channel_context injection).
+        self._ambient_buffers: Dict[str, "deque[str]"] = {}
+        # Cache of standalone MemoryProvider instances keyed by Honcho session_key.
+        # We hold our own provider per session so we don't fight the agent's instance.
+        self._ambient_providers: Dict[str, Any] = {}
+        # Sentinel — None means "tried and failed to load, don't retry per-session".
+        self._ambient_provider_failed: Set[str] = set()
+        import threading
+        self._ambient_lock = threading.Lock()
+
     def _parse_prefix(self, prefix: str) -> Dict[str, str]:
         """Parse IRC prefix into nick, user, host components."""
         match = IRC_PREFIX_RE.match(prefix or "")
@@ -232,6 +250,102 @@ class IRCAdapter(BasePlatformAdapter):
             user_name=nick,
             chat_type="group" if channel.startswith("#") else "dm",
         )
+
+    def _get_or_load_ambient_provider(self, source: SessionSource) -> Optional[Any]:
+        """Load (and cache) a MemoryProvider for ambient writes against this source.
+
+        Mirrors the kwargs hermes-agent uses in agent_init.py so session keying
+        matches the agent's own provider — both write to the same Honcho session.
+        Returns None if the provider can't be loaded or initialized; callers should
+        treat that as "ambient memory disabled for this session".
+        """
+        session_key = build_session_key(source, group_sessions_per_user=True)
+        if session_key in self._ambient_provider_failed:
+            return None
+        cached = self._ambient_providers.get(session_key)
+        if cached is not None:
+            return cached
+
+        with self._ambient_lock:
+            cached = self._ambient_providers.get(session_key)
+            if cached is not None:
+                return cached
+            if session_key in self._ambient_provider_failed:
+                return None
+            try:
+                from plugins.memory import load_memory_provider
+                provider = load_memory_provider("honcho")
+                if provider is None or not provider.is_available():
+                    logger.info("IRC ambient: honcho provider unavailable; ambient writes disabled for %s", session_key)
+                    self._ambient_provider_failed.add(session_key)
+                    return None
+                init_kwargs = {
+                    "platform": "irc",
+                    "agent_context": "primary",
+                    "user_id": source.user_id,
+                    "user_name": source.user_name,
+                    "chat_id": source.chat_id,
+                    "chat_type": source.chat_type,
+                    "gateway_session_key": session_key,
+                }
+                provider.initialize(session_id=session_key, **init_kwargs)
+                self._ambient_providers[session_key] = provider
+                logger.debug("IRC ambient: provider initialized for %s", session_key)
+                return provider
+            except Exception as exc:
+                logger.warning("IRC ambient: failed to load honcho provider for %s: %s", session_key, exc)
+                self._ambient_provider_failed.add(session_key)
+                return None
+
+    def _record_ambient_line(self, prefix: str, channel: str, text: str) -> None:
+        """Buffer an unaddressed channel line and write it to Honcho.
+
+        Two effects:
+          1. Append to the per-channel rolling buffer for later channel_context injection.
+          2. Fire `sync_turn(line, "", session_id=key)` on a per-user Honcho provider so
+             Honcho's deriver builds a peer card for the speaker even if they never
+             address the bot.
+        """
+        if not self._ambient_memory:
+            return
+        nick = self._parse_prefix(prefix).get("nick", "unknown")
+        # 1. Per-channel buffer for next addressed-message context dump.
+        from collections import deque
+        buf = self._ambient_buffers.get(channel)
+        if buf is None:
+            buf = deque(maxlen=self._ambient_buffer_size)
+            self._ambient_buffers[channel] = buf
+        buf.append(f"<{nick}> {text}")
+
+        # 2. Write to the speaker's own Honcho session so their peer card grows.
+        source = self._build_source(prefix, channel)
+        provider = self._get_or_load_ambient_provider(source)
+        if provider is None:
+            return
+        session_key = build_session_key(source, group_sessions_per_user=True)
+        try:
+            # Empty assistant content = user-only write. Verified at honcho/__init__.py:1120
+            provider.sync_turn(text, "", session_id=session_key)
+        except Exception as exc:
+            logger.debug("IRC ambient: sync_turn failed for %s: %s", session_key, exc)
+
+    def _drain_ambient_context(self, channel: str) -> Optional[str]:
+        """Drain and format the ambient buffer for a channel as channel_context.
+
+        Returns None if the buffer is empty or ambient memory is disabled.
+        Called when an addressed message arrives — gives the responding agent
+        immediate scrollback even before Honcho's slower derivation kicks in.
+        """
+        if not self._ambient_memory:
+            return None
+        buf = self._ambient_buffers.get(channel)
+        if not buf:
+            return None
+        lines = list(buf)
+        buf.clear()
+        if not lines:
+            return None
+        return "[Recent channel activity]\n" + "\n".join(lines)
 
     # ------------------------------------------------------------------
     # Required overrides
@@ -780,24 +894,28 @@ class IRCAdapter(BasePlatformAdapter):
         if target.startswith("#"):
             chat_id = target
 
-            # For channels: only respond to messages that mention us
-            mention_block_pattern = re.compile(r"^(([a-zA-Z_][a-zA-Z0-9_-]*:)+ )+", re.IGNORECASE)
-            match = mention_block_pattern.match(text)
-            if not match:
-                logger.debug("IRC: Filtered channel message (no mention): %s", text[:100])
+            # Filter self-messages early so we don't observe our own ambient writes.
+            parsed_early = self._parse_prefix(prefix)
+            if parsed_early.get("nick") == self._actual_nick:
+                logger.debug("IRC: Filtered self-message (early): %s", parsed_early.get("nick"))
                 return
 
-            nick_pattern = re.compile(r"^[a-zA-Z_][a-zA-Z0-9_-]*$")
-            mentioned_nicks = [
-                nick_part.lower()
-                for nick_part in match.group(0).split(": ")
-                if nick_part and nick_pattern.match(nick_part)
-            ]
+            mention_block_pattern = re.compile(r"^(([a-zA-Z_][a-zA-Z0-9_-]*:)+ )+", re.IGNORECASE)
+            match = mention_block_pattern.match(text)
+            addressed = False
+            if match:
+                nick_pattern = re.compile(r"^[a-zA-Z_][a-zA-Z0-9_-]*$")
+                mentioned_nicks = [
+                    nick_part.lower()
+                    for nick_part in match.group(0).split(": ")
+                    if nick_part and nick_pattern.match(nick_part)
+                ]
+                addressed = self._actual_nick.lower() in mentioned_nicks
 
-            if self._actual_nick.lower() not in mentioned_nicks:
-                logger.warning("IRC: Filtered channel message (we were not mentioned): %s", text[:100])
-                logger.warning("IRC: _actual_nick=%s (lower=%s), mentioned_nicks=%s", 
-                           self._actual_nick, self._actual_nick.lower(), mentioned_nicks)
+            if not addressed:
+                # Ambient line: observe it (buffer + Honcho write) but don't dispatch a turn.
+                self._record_ambient_line(prefix, chat_id, text)
+                logger.debug("IRC: Observed ambient channel message: %s", text[:100])
                 return
 
             mention_block = match.group(0)
@@ -827,12 +945,17 @@ class IRCAdapter(BasePlatformAdapter):
         # Build session source
         source = self._build_source(prefix, chat_id)
 
+        # Drain any buffered ambient lines for this channel so the responding
+        # agent sees recent context. Only meaningful for channel messages.
+        ambient_context = self._drain_ambient_context(chat_id) if chat_id.startswith("#") else None
+
         # Create message event
         event = MessageEvent(
             text=text,
             message_type=MessageType.TEXT,
             source=source,
             raw_message={"prefix": prefix, "params": params, "trailing": trailing},
+            channel_context=ambient_context,
         )
 
         if self._message_handler:

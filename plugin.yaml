@@ -81,3 +81,11 @@ optional_env:
     description: "Default channel for cron delivery"
     prompt: "Home channel"
     password: false
+  - name: IRC_AMBIENT_MEMORY
+    description: "Observe unaddressed channel chatter into Honcho memory (true/false, default: true). Bot still only RESPONDS when mentioned, but builds peer cards from everyone it sees."
+    prompt: "Observe ambient chatter?"
+    password: false
+  - name: IRC_AMBIENT_BUFFER
+    description: "Max unaddressed lines buffered per channel for next addressed-message context (default: 20)"
+    prompt: "Ambient buffer size"
+    password: false
