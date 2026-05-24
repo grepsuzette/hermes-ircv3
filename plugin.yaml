@@ -45,6 +45,10 @@ optional_env:
     description: "Enable TLS (true/false, default: false)"
     prompt: "Use TLS?"
     password: false
+  - name: IRC_VALIDATE_TLS
+    description: "Validate TLS certificate (true/false, default: true). Set false to accept self-signed/expired certs."
+    prompt: "Validate TLS cert?"
+    password: false
   - name: IRC_TLS_CA_CERT
     description: "Path to custom CA certificate (PEM)"
     prompt: "CA cert path"

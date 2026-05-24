@@ -12,6 +12,7 @@ Environment variables:
     IRC_PASSWORD         Server password (optional)
     IRC_CHANNELS         Comma-separated list of channels to join (e.g. #bots,#help)
     IRC_USE_TLS          Set "true" to enable TLS (default: false)
+    IRC_VALIDATE_TLS     Set "false" to accept self-signed/expired certs (default: true)
     IRC_TLS_CA_CERT      Path to PEM-encoded certificate file to trust for TLS (optional)
     IRC_MESSAGE_CHUNK_LIMIT  Max characters per message when BATCH unavailable (default: 512, auto-updated from ISUPPORT LINELEN)
     IRC_REQUIRE_MULTILINE Set "true" to fail connection if server doesn't support draft/multiline (default: false)
@@ -144,6 +145,7 @@ class IRCAdapter(BasePlatformAdapter):
         self._realname: str = os.getenv("IRC_REALNAME", "") or "Hermes Agent"
         self._password: str = os.getenv("IRC_PASSWORD", "")
         self._use_tls: bool = os.getenv("IRC_USE_TLS", "").lower() in ("true", "1", "yes")
+        self._validate_tls: bool = os.getenv("IRC_VALIDATE_TLS", "true").lower() in ("true", "1", "yes")
 
         # Channels to join
         channels_str = os.getenv("IRC_CHANNELS", "")
@@ -291,6 +293,11 @@ class IRCAdapter(BasePlatformAdapter):
                     else:
                         logger.error("IRC: TLS certificate file not found: %s", custom_cert_path)
                         return False
+
+                if not self._validate_tls:
+                    ssl_context.check_hostname = False
+                    ssl_context.verify_mode = ssl.CERT_NONE
+                    logger.warning("IRC: TLS certificate validation disabled (IRC_VALIDATE_TLS=false)")
 
                 self._reader, self._writer = await asyncio.open_connection(
                     self._server, self._port or 6697, ssl=ssl_context
