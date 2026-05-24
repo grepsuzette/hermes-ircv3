@@ -13,7 +13,7 @@ Environment variables:
     IRC_CHANNELS         Comma-separated list of channels to join (e.g. #bots,#help)
     IRC_USE_TLS          Set "true" to enable TLS (default: false)
     IRC_TLS_CA_CERT      Path to PEM-encoded certificate file to trust for TLS (optional)
-    IRC_MESSAGE_CHUNK_LIMIT  Max characters per message when BATCH unavailable (default: 350)
+    IRC_MESSAGE_CHUNK_LIMIT  Max characters per message when BATCH unavailable (default: 512, auto-updated from ISUPPORT LINELEN)
     IRC_REQUIRE_MULTILINE Set "true" to fail connection if server doesn't support draft/multiline (default: false)
     IRC_NICKSERV_PASSWORD NickServ password for authentication (optional)
     IRC_NICKSERV_SERVICE NickServ service name (default: NickServ)
@@ -149,14 +149,17 @@ class IRCAdapter(BasePlatformAdapter):
             if ch.strip()
         }
 
+        self._isupport: Dict[str, str] = {}
+
         # Message chunk limit for long messages (when BATCH unavailable)
-        self._message_chunk_limit: int = int(os.getenv("IRC_MESSAGE_CHUNK_LIMIT", "350"))
+        # Default to 512 (IRC protocol max), will be updated from ISUPPORT LINELEN
+        self._message_chunk_limit: int = int(os.getenv("IRC_MESSAGE_CHUNK_LIMIT", "512"))
 
         # Require draft/multiline support (fail if server doesn't support it)
         self._require_multiline: bool = os.getenv("IRC_REQUIRE_MULTILINE", "").lower() in ("true", "1", "yes")
 
         # Warn if multiline is required but chunk limit is at default
-        if self._require_multiline and self._message_chunk_limit == 350:
+        if self._require_multiline and self._message_chunk_limit == 512:
             logger.warning(
                 "IRC: require_multiline is enabled but message_chunk_limit is at default (350). "
                 "Consider increasing message_chunk_limit or disabling require_multiline to avoid unnecessary chunking."
@@ -668,6 +671,27 @@ class IRCAdapter(BasePlatformAdapter):
                 self._send_line(nickserv_identify)
                 logger.info("IRC: sent NickServ IDENTIFY")
 
+            return
+
+        # Handle ISUPPORT (005) - server capabilities including LINELEN
+        if cmd == "005":
+            # ISUPPORT tokens are in params (excluding the trailing human-readable text)
+            for token in params[1:]:  # skip our nick (params[0])
+                if "=" in token:
+                    key, value = token.split("=", 1)
+                    self._isupport[key] = value
+                else:
+                    self._isupport[token] = ""
+            # Update message_chunk_limit from LINELEN if advertised
+            if "LINELEN" in self._isupport:
+                try:
+                    linelen = int(self._isupport["LINELEN"])
+                    # Subtract overhead: "PRIVMSG #channel :" prefix
+                    overhead = len(f"PRIVMSG {'#' * 30} :")
+                    self._message_chunk_limit = max(linelen - overhead, 100)
+                    logger.info("IRC: ISUPPORT LINELEN=%d, set message_chunk_limit to %d", linelen, self._message_chunk_limit)
+                except ValueError:
+                    pass
             return
 
         # Handle PRIVMSG (actual chat messages)

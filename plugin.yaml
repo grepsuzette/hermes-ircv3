@@ -58,7 +58,7 @@ optional_env:
     prompt: "NickServ service"
     password: false
   - name: IRC_MESSAGE_CHUNK_LIMIT
-    description: "Max chars per message when BATCH unavailable (default: 350)"
+    description: "Max chars per message when BATCH unavailable (default: 512, auto-updated from ISUPPORT LINELEN)"
     prompt: "Message chunk limit"
     password: false
   - name: IRC_REQUIRE_MULTILINE

@@ -72,7 +72,7 @@ IRC_REALNAME="My AI Bot"        # optional, defaults to "Hermes Agent"
 IRC_CHANNELS=#channel1,#channel2  # comma-separated channels to join
 IRC_ALLOWED_USERS=alice,bob    # case insensitive nicks, * to allow all
 
-IRC_MESSAGE_CHUNK_LIMIT=16384  # per-line limit when BATCH unavailable (default 350)
+IRC_MESSAGE_CHUNK_LIMIT=16384  # per-line limit when BATCH unavailable (default 512, auto-updated from ISUPPORT LINELEN)
 IRC_REQUIRE_MULTILINE=true     # fail if server lacks draft/multiline
 
 IRC_TLS_CA_CERT=/path/to/cert.pem  # custom CA certificate for TLS
