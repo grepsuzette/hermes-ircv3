@@ -923,14 +923,13 @@ def register(ctx):
         cron_deliver_env_var="IRC_HOME_CHANNEL",
         allowed_users_env="IRC_ALLOWED_USERS",
         allow_all_env="IRC_ALLOW_ALL_USERS",
-        max_message_length=450,
+        max_message_length=0,
         emoji="💬",
         pii_safe=False,
         allow_update_command=True,
         platform_hint=(
             "You are chatting via IRC. IRC does not support markdown formatting "
-            "— use plain text only. Messages are limited to ~450 characters per "
-            "line (long messages are automatically split). In channels, users "
+            "— use plain text only. In channels, users "
             "address you by prefixing your nick. Keep responses concise and "
             "conversational."
         ),
