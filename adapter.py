@@ -584,7 +584,7 @@ class IRCAdapter(BasePlatformAdapter):
             if len(params) >= 3 and params[2] == "*":
                 return
             if "draft/multiline" in self._accumulated_caps:
-                self._send_line("CAP REQ :draft/multiline")
+                self._send_line("CAP REQ :draft/multiline echo-message")
             else:
                 if self._require_multiline:
                     logger.error("IRC: draft/multiline required but not supported by server")
