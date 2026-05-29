@@ -40,9 +40,11 @@ import os
 import re
 import ssl
 import time
+from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Set
 
-from gateway.config import Platform, PlatformConfig
+from gateway.config import Platform, PlatformConfig, get_hermes_home
 from gateway.platforms.base import (
     BasePlatformAdapter,
     MessageEvent,
@@ -196,6 +198,12 @@ class IRCAdapter(BasePlatformAdapter):
         self._actual_nick: str = self._nick
         self._nick_collision_attempted: bool = False
 
+        # Channel log directory: ~/.hermes/profiles/<bot>/logs/irc/
+        try:
+            self._channel_log_dir: Optional[Path] = get_hermes_home() / "logs" / "irc"
+        except Exception:
+            self._channel_log_dir = None
+
     def _parse_prefix(self, prefix: str) -> Dict[str, str]:
         """Parse IRC prefix into nick, user, host components."""
         match = IRC_PREFIX_RE.match(prefix or "")
@@ -219,6 +227,19 @@ class IRCAdapter(BasePlatformAdapter):
             "params": (match.group("params") or "").strip().split(),
             "trailing": match.group("trailing") or "",
         }
+
+    def _log_channel_message(self, channel: str, nick: str, text: str) -> None:
+        if not self._channel_log_dir:
+            return
+        try:
+            self._channel_log_dir.mkdir(parents=True, exist_ok=True)
+            ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S")
+            text = text.replace("\n", "\\n")
+            safe_name = channel.lstrip("#").replace("/", "_") + ".log"
+            with open(self._channel_log_dir / safe_name, "a", encoding="utf-8") as f:
+                f.write(f"{ts} <{nick}> {text}\n")
+        except Exception as exc:
+            logger.debug("IRC: channel log write failed: %s", exc)
 
     def _build_source(self, prefix: str, channel: str) -> SessionSource:
         """Build a SessionSource from IRC message metadata."""
@@ -717,10 +738,7 @@ class IRCAdapter(BasePlatformAdapter):
         self, params: List[str], trailing: str
     ) -> None:
         """Handle BATCH commands for draft/multiline support."""
-        if not params:
-            return
-
-        batch_param = params[0] or trailing
+        batch_param = (params[0] if params else None) or trailing
         if not batch_param:
             return
 
@@ -735,6 +753,15 @@ class IRCAdapter(BasePlatformAdapter):
             batch_id = batch_param[1:]
             messages = self._incoming_batches.pop(batch_id, [])
             self._multiline_batch_ids.discard(batch_id)
+
+            if messages:
+                first = messages[0]
+                combined_text = "\n".join(m["text"] for m in messages)
+
+                if first["chat_id"].startswith("#"):
+                    self._log_channel_message(
+                        first["chat_id"], first["sender_nick"], combined_text
+                    )
 
             if messages and self._message_handler:
                 first = messages[0]
@@ -796,6 +823,9 @@ class IRCAdapter(BasePlatformAdapter):
         # Determine if this is a channel message or DM
         if target.startswith("#"):
             chat_id = target
+
+            # Log all channel messages (before mention filtering)
+            self._log_channel_message(target, self._parse_prefix(prefix).get("nick", "?"), text)
 
             # For channels: only respond to messages that mention us
             mention_block_pattern = re.compile(r"^(([a-zA-Z_][a-zA-Z0-9_-]*:)+ )+", re.IGNORECASE)
