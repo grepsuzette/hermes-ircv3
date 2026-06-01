@@ -757,40 +757,13 @@ class IRCAdapter(BasePlatformAdapter):
             if messages:
                 first = messages[0]
                 combined_text = "\n".join(m["text"] for m in messages)
-
-                if first["chat_id"].startswith("#"):
-                    self._log_channel_message(
-                        first["chat_id"], first["sender_nick"], combined_text
-                    )
-
-            if messages:
-                first = messages[0]
-                combined_text = "\n".join(m["text"] for m in messages)
-                sender_nick = first.get("sender_nick", "")
-
-                # Filter self-messages (echo-message echo of our own BATCH sends)
-                if sender_nick == self._actual_nick:
-                    logger.debug("IRC: Filtered self-message batch from %s", sender_nick)
-                    return
-
-                source = self._build_source(first["prefix"], first["chat_id"])
-
-                event = MessageEvent(
-                    text=combined_text,
-                    message_type=MessageType.TEXT,
-                    source=source,
-                    raw_message={
-                        "prefix": first["prefix"],
-                        "params": first["params"],
-                        "trailing": combined_text,
-                        "batch_id": batch_id,
-                    },
+                # Route through _handle_privmsg so mention/self/CTCP filters apply
+                await self._handle_privmsg(
+                    prefix=first["prefix"],
+                    params=first["params"],
+                    trailing=combined_text,
+                    tags={},
                 )
-
-                try:
-                    await self.handle_message(event)
-                except Exception as exc:
-                    logger.error("IRC: message handler error: %s", exc)
 
     async def _handle_privmsg(
         self, prefix: str, params: List[str], trailing: str, tags: Dict[str, str]
