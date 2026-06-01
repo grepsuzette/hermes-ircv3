@@ -19,6 +19,7 @@ Environment variables:
     IRC_NICKSERV_SERVICE NickServ service name (default: NickServ)
     IRC_ALLOWED_USERS    Comma-separated nicks/hosts allowed to command bot
     IRC_HOME_CHANNEL     Default channel for cron/notification delivery
+    IRC_SILENT_CHANNELS  Comma-separated channels to join but never respond to (the-living-room)
 
 Notes:
     - IRC is text-only; no media support (images, voice, documents)
@@ -150,6 +151,14 @@ class IRCAdapter(BasePlatformAdapter):
         self._channels: Set[str] = {
             ch.strip() if ch.strip().startswith("#") else f"#{ch.strip()}"
             for ch in channels_str.split(",")
+            if ch.strip()
+        }
+
+        # Silent channels (the-living-room: log but never respond)
+        silent_str = os.getenv("IRC_SILENT_CHANNELS", "")
+        self._silent_channels: Set[str] = {
+            ch.strip().lower() if ch.strip().startswith("#") else f"#{ch.strip().lower()}"
+            for ch in silent_str.split(",")
             if ch.strip()
         }
 
@@ -818,6 +827,12 @@ class IRCAdapter(BasePlatformAdapter):
 
             # Log all channel messages (before mention filtering)
             self._log_channel_message(target, sender_nick_raw, text)
+
+            # Silent channels: log and buffer but never respond
+            if target.lower() in self._silent_channels:
+                self._buf_append(target, sender_nick_raw, text)
+                logger.debug("IRC: Silenced channel message (no response): %s", text[:100])
+                return
 
             # Buffer all channel messages for conversation continuity
             self._buf_append(target, sender_nick_raw, text)
