@@ -34,6 +34,8 @@ Notes:
 
 from __future__ import annotations
 
+from collections import deque
+
 import asyncio
 import logging
 import os
@@ -177,7 +179,6 @@ class IRCAdapter(BasePlatformAdapter):
         self._registered = False
 
         # Message deduplication (bounded)
-        from collections import deque
         self._processed_msgs: deque = deque(maxlen=500)
         self._processed_msgs_set: set = set()
 
@@ -203,6 +204,14 @@ class IRCAdapter(BasePlatformAdapter):
             self._channel_log_dir: Optional[Path] = get_hermes_home() / "logs" / "irc"
         except Exception:
             self._channel_log_dir = None
+
+        # Per-channel ring buffer (last 15 messages) for conversation continuity
+        self._channel_buffer: Dict[str, deque] = {}
+
+    def _buf_append(self, channel: str, nick: str, text: str) -> None:
+        """Append a message to the per-channel ring buffer (maxlen=15)."""
+        buf = self._channel_buffer.setdefault(channel, deque(maxlen=15))
+        buf.append((nick, time.time(), text))
 
     def _parse_prefix(self, prefix: str) -> Dict[str, str]:
         """Parse IRC prefix into nick, user, host components."""
@@ -461,6 +470,9 @@ class IRCAdapter(BasePlatformAdapter):
 
         try:
             await self._writer.drain()
+            # Track outgoing channel messages in buffer
+            if chat_id.startswith("#"):
+                self._buf_append(chat_id, self._actual_nick, content[:200])
             return SendResult(success=True)
         except Exception as exc:
             logger.error("IRC: failed to send to %s: %s", chat_id, exc)
@@ -802,35 +814,52 @@ class IRCAdapter(BasePlatformAdapter):
         # Determine if this is a channel message or DM
         if target.startswith("#"):
             chat_id = target
+            sender_nick_raw = self._parse_prefix(prefix).get("nick", "?")
 
             # Log all channel messages (before mention filtering)
-            self._log_channel_message(target, self._parse_prefix(prefix).get("nick", "?"), text)
+            self._log_channel_message(target, sender_nick_raw, text)
+
+            # Buffer all channel messages for conversation continuity
+            self._buf_append(target, sender_nick_raw, text)
 
             # For channels: only respond to messages that mention us
             mention_block_pattern = re.compile(r"^(([a-zA-Z_][a-zA-Z0-9_-]*:)+ )+", re.IGNORECASE)
             match = mention_block_pattern.match(text)
             if not match:
-                logger.debug("IRC: Filtered channel message (no mention): %s", text[:100])
-                return
+                # No mention prefix — check if we were the last non-sender to speak
+                # (conversation continuity convention)
+                buf = self._channel_buffer.get(target)
+                responded = False
+                if buf:
+                    sender_lower = sender_nick_raw.lower()
+                    for bnick, _, _ in reversed(buf):
+                        if bnick.lower() == sender_lower:
+                            continue
+                        if bnick.lower() == self._actual_nick.lower():
+                            responded = True
+                        break
+                if not responded:
+                    logger.debug("IRC: Filtered channel message (no mention, not last speaker): %s", text[:100])
+                    return
+            else:
+                nick_pattern = re.compile(r"^[a-zA-Z_][a-zA-Z0-9_-]*$")
+                mentioned_nicks = [
+                    nick_part.lower()
+                    for nick_part in match.group(0).split(": ")
+                    if nick_part and nick_pattern.match(nick_part)
+                ]
 
-            nick_pattern = re.compile(r"^[a-zA-Z_][a-zA-Z0-9_-]*$")
-            mentioned_nicks = [
-                nick_part.lower()
-                for nick_part in match.group(0).split(": ")
-                if nick_part and nick_pattern.match(nick_part)
-            ]
+                if self._actual_nick.lower() not in mentioned_nicks:
+                    logger.warning("IRC: Filtered channel message (we were not mentioned): %s", text[:100])
+                    logger.warning("IRC: _actual_nick=%s (lower=%s), mentioned_nicks=%s", 
+                               self._actual_nick, self._actual_nick.lower(), mentioned_nicks)
+                    return
 
-            if self._actual_nick.lower() not in mentioned_nicks:
-                logger.warning("IRC: Filtered channel message (we were not mentioned): %s", text[:100])
-                logger.warning("IRC: _actual_nick=%s (lower=%s), mentioned_nicks=%s", 
-                           self._actual_nick, self._actual_nick.lower(), mentioned_nicks)
-                return
-
-            mention_block = match.group(0)
-            remainder = text[len(mention_block):]
-            command_pattern = re.compile(r"^/[a-zA-Z_][a-zA-Z0-9_-]+")
-            if command_pattern.match(remainder.lstrip()):
-                text = remainder.lstrip()
+                mention_block = match.group(0)
+                remainder = text[len(mention_block):]
+                command_pattern = re.compile(r"^/[a-zA-Z_][a-zA-Z0-9_-]+")
+                if command_pattern.match(remainder.lstrip()):
+                    text = remainder.lstrip()
         else:
             # DM
             parsed = self._parse_prefix(prefix)
