@@ -217,6 +217,15 @@ class IRCAdapter(BasePlatformAdapter):
         # Per-channel ring buffer (last 15 messages) for conversation continuity
         self._channel_buffer: Dict[str, deque] = {}
 
+        # Known bot nicks from other hermes profiles (for bot-to-bot filtering)
+        profiles_dir = Path.home() / ".hermes" / "profiles"
+        self._known_bot_nicks: Set[str] = {
+            line.split("=", 1)[1].strip().lower().rstrip("_")
+            for p in profiles_dir.glob("*/.env")
+            for line in p.read_text(errors="ignore").splitlines()
+            if line.startswith("IRC_NICK=")
+        }
+
     def _buf_append(self, channel: str, nick: str, text: str) -> None:
         """Append a message to the per-channel ring buffer (maxlen=15)."""
         buf = self._channel_buffer.setdefault(channel, deque(maxlen=15))
@@ -841,12 +850,15 @@ class IRCAdapter(BasePlatformAdapter):
             mention_block_pattern = re.compile(r"^(([a-zA-Z_][a-zA-Z0-9_-]*:)+ )+", re.IGNORECASE)
             match = mention_block_pattern.match(text)
             if not match:
+                # Bot-to-bot: only respond if explicitly mentioned
+                sender_lower = sender_nick_raw.lower().rstrip("_")
+                if sender_lower in self._known_bot_nicks:
+                    return
                 # No mention prefix — check if we were the last non-sender to speak
                 # (conversation continuity convention)
                 buf = self._channel_buffer.get(target)
                 responded = False
                 if buf:
-                    sender_lower = sender_nick_raw.lower()
                     for bnick, _, _ in reversed(buf):
                         if bnick.lower() == sender_lower:
                             continue
