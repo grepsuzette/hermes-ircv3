@@ -4,7 +4,12 @@ Connects to any IRC server (IRCd) via asyncio sockets with IRCv3 protocol
 support, including draft/multiline for multiline messages.
 
 Environment variables:
-    IRC_SERVER           IRC server hostname (e.g. irc.libera.chat)
+    IRC_SERVER           IRC server hostname, or comma-separated endpoints
+                         for failover (e.g. mybox.local:6697,backup.local).
+                         Per-entry port overrides IRC_PORT; entries without
+                         a port use IRC_PORT or the TLS default.
+                         Consider running your own IRCd behind port forwarding
+                         for privacy and control.
     IRC_PORT             IRC server port (default: 6667, use 6697 for TLS)
     IRC_NICK             Bot nickname
     IRC_USERNAME          Username for USER command (default: IRC_NICK)
@@ -145,6 +150,30 @@ class IRCAdapter(BasePlatformAdapter):
         self._realname: str = os.getenv("IRC_REALNAME", "") or "Hermes Agent"
         self._password: str = os.getenv("IRC_PASSWORD", "")
         self._use_tls: bool = os.getenv("IRC_USE_TLS", "").lower() in ("true", "1", "yes")
+
+        # Parse endpoints from IRC_SERVER (comma-separated, each host[:port])
+        # Falls back to IRC_PORT (or TLS default) for entries without explicit port
+        self._endpoints: List[tuple] = []
+        default_port = self._port or (6697 if self._use_tls else 6667)
+        for part in self._server.split(","):
+            part = part.strip()
+            if not part:
+                continue
+            if part.startswith("[") and "]:" in part:
+                # IPv6 literal: [::1]:6667
+                host = part.split("]")[0] + "]"
+                port = int(part.rsplit("]:", 1)[1])
+            elif ":" in part and not part.startswith("["):
+                host, _, port_str = part.rpartition(":")
+                try:
+                    port = int(port_str)
+                except ValueError:
+                    host = part
+                    port = default_port
+            else:
+                host = part
+                port = default_port
+            self._endpoints.append((host, port))
 
         # Channels to join
         channels_str = os.getenv("IRC_CHANNELS", "")
@@ -294,32 +323,42 @@ class IRCAdapter(BasePlatformAdapter):
             logger.error("IRC: server or nick not configured")
             return False
 
-        try:
-            logger.debug("IRC: Attempting to open_connection to %s:%s", self._server, self._port or 6667)
-            # Open connection
-            if self._use_tls:
-                ssl_context = ssl.create_default_context()
+        # Build SSL context once if TLS is enabled
+        ssl_context = None
+        if self._use_tls:
+            ssl_context = ssl.create_default_context()
+            custom_cert_path = os.getenv("IRC_TLS_CA_CERT", "")
+            if custom_cert_path:
+                if os.path.exists(custom_cert_path):
+                    ssl_context.load_verify_locations(cafile=custom_cert_path)
+                    logger.info("IRC: Loaded custom TLS certificate from %s", custom_cert_path)
+                else:
+                    logger.error("IRC: TLS certificate file not found: %s", custom_cert_path)
+                    return False
 
-                # Load custom certificate if provided
-                custom_cert_path = os.getenv("IRC_TLS_CA_CERT", "")
-                if custom_cert_path:
-                    if os.path.exists(custom_cert_path):
-                        ssl_context.load_verify_locations(cafile=custom_cert_path)
-                        logger.info("IRC: Loaded custom TLS certificate from %s", custom_cert_path)
-                    else:
-                        logger.error("IRC: TLS certificate file not found: %s", custom_cert_path)
-                        return False
+        # Try each endpoint in sequence until one connects
+        connected = False
+        for host, port in self._endpoints:
+            try:
+                logger.debug("IRC: Attempting connection to %s:%s", host, port)
+                if ssl_context:
+                    self._reader, self._writer = await asyncio.open_connection(
+                        host, port, ssl=ssl_context
+                    )
+                else:
+                    self._reader, self._writer = await asyncio.open_connection(
+                        host, port
+                    )
+                self._server = host
+                self._port = port
+                logger.info("IRC: Connected to %s:%s", host, port)
+                connected = True
+                break
+            except Exception as exc:
+                logger.warning("IRC: Failed to connect to %s:%s: %s", host, port, exc)
 
-                self._reader, self._writer = await asyncio.open_connection(
-                    self._server, self._port or 6697, ssl=ssl_context
-                )
-            else:
-                self._reader, self._writer = await asyncio.open_connection(
-                    self._server, self._port or 6667
-                )
-            logger.debug("IRC: Connection established successfully")
-        except Exception as exc:
-            logger.error("IRC: failed to connect to %s:%s: %s", self._server, self._port, exc)
+        if not connected:
+            logger.error("IRC: All endpoints failed")
             return False
 
         self._closing = False

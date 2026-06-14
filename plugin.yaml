@@ -13,7 +13,7 @@ author: Team Alex
 license: GPL-3.0
 requires_env:
   - name: IRC_SERVER
-    description: "IRC server hostname (e.g. irc.libera.chat)"
+    description: "IRC server hostname, or comma-separated endpoints for failover (e.g. mybox.local:6697,backup.local). Consider running your own IRCd behind port forwarding."
     prompt: "IRC server"
     password: false
   - name: IRC_CHANNELS
